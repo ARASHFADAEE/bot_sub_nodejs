@@ -1356,46 +1356,102 @@ bot.on('text', async (ctx) => {
     return;
   }
   
-  // اگر ادمین در حال وارد کردن آیدی کاربر برای بررسی وضعیت است
-  if (userId.toString() === adminId && ctx.session && ctx.session.waitingForUserId) {
-    const targetUserId = ctx.message.text.trim();
+// اگر ادمین در حال وارد کردن آیدی کاربر برای بررسی وضعیت است
+if (userId.toString() === adminId && ctx.session && ctx.session.waitingForUserId) {
+  const targetUserId = ctx.message.text.trim();
+  
+  console.log(`ادمین در حال بررسی وضعیت کاربر با آیدی ${targetUserId}...`);
+  
+  // بررسی اینکه آیا ورودی یک عدد است
+  if (!/^\d+$/.test(targetUserId)) {
+    await ctx.reply('لطفاً یک آیدی عددی معتبر وارد کنید.');
+    return;
+  }
+  
+  // پاک کردن حالت انتظار برای آیدی
+  ctx.session.waitingForUserId = false;
+  
+  try {
+    // دریافت اطلاعات کاربر
+    const user = await getUser(targetUserId);
     
-    console.log(`ادمین در حال بررسی وضعیت کاربر با آیدی ${targetUserId}...`);
-    
-    // بررسی اینکه آیا ورودی یک عدد است
-    if (!/^\d+$/.test(targetUserId)) {
-      await ctx.reply('لطفاً یک آیدی عددی معتبر وارد کنید.');
+    if (!user) {
+      await ctx.reply('کاربری با این آیدی یافت نشد.');
       return;
     }
     
-    ctx.session.waitingForUserId = false;
+    await ctx.reply(`کاربر یافت شد. در حال بارگذاری پروفایل...`);
     
-    // هدایت به مشاهده پروفایل کاربر
-    try {
-      const user = await getUser(targetUserId);
+    // دریافت اطلاعات عضویت
+    const vipGroupId = process.env.VIP_GROUP_ID;
+    const membership = await getGroupMembership(targetUserId, vipGroupId);
+    
+    // دریافت تراکنش‌های کاربر
+    const transactions = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT *
+        FROM transactions
+        WHERE user_id = ? AND status = 'success'
+        ORDER BY created_at DESC
+        LIMIT 5
+      `, [targetUserId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+    
+    // تهیه پروفایل کاربر
+    const userName = `${user.first_name} ${user.last_name || ''}`.trim();
+    let profileInfo = `👤 پروفایل کاربر:\n\nنام: ${userName}\nیوزرنیم: ${user.username ? `@${user.username}` : 'ندارد'}\nآیدی: ${user.user_id}\nشماره تلفن: ${user.phone_number}\nتاریخ ثبت‌نام: ${new Date(user.registered_at).toLocaleDateString('fa-IR')}\n\n`;
+    
+    // اطلاعات اشتراک
+    profileInfo += `📊 وضعیت اشتراک:\n`;
+    if (user.subscription_type) {
+      const today = new Date().toISOString().split('T')[0];
+      const isActive = user.subscription_expiry >= today;
       
-      if (!user) {
-        await ctx.reply('کاربری با این آیدی یافت نشد.');
-        return;
-      }
-      
-      // استفاده از اکشن مشاهده پروفایل
-      await ctx.reply(`کاربر یافت شد. در حال بارگذاری پروفایل...`);
-      
-      // شبیه‌سازی اکشن view_profile
-      const match = { 1: targetUserId };
-      ctx.match = match;
-      
-      // فراخوانی اکشن view_profile
-      const handler = bot.action(/^view_profile_(\d+)$/).middleware();
-      await handler(ctx);
-    } catch (error) {
-      console.error('خطا در بررسی وضعیت کاربر:', error);
-      await ctx.reply('خطا در بررسی وضعیت کاربر.');
+      profileInfo += `نوع اشتراک: ${user.subscription_type}\n`;
+      profileInfo += `تاریخ انقضا: ${user.subscription_expiry}\n`;
+      profileInfo += `وضعیت: ${isActive ? 'فعال ✅' : 'منقضی شده ❌'}\n\n`;
+    } else {
+      profileInfo += `بدون اشتراک ❌\n\n`;
     }
     
-    return;
+    // اطلاعات عضویت در گروه
+    profileInfo += `👑 وضعیت عضویت در گروه VIP:\n`;
+    if (membership) {
+      profileInfo += `تاریخ عضویت: ${new Date(membership.joined_at).toLocaleDateString('fa-IR')}\n`;
+      profileInfo += `تاریخ انقضا: ${new Date(membership.expiry_at).toLocaleDateString('fa-IR')}\n`;
+      profileInfo += `وضعیت: ${membership.is_active ? 'فعال ✅' : 'غیرفعال ❌'}\n`;
+      profileInfo += `اطلاع‌رسانی: ${membership.notification_sent ? 'انجام شده ✓' : 'انجام نشده ✗'}\n\n`;
+    } else {
+      profileInfo += `عضو گروه نیست ❌\n\n`;
+    }
+    
+    // اطلاعات تراکنش‌ها
+    profileInfo += `💰 آخرین تراکنش‌ها:\n`;
+    if (transactions.length > 0) {
+      for (const tx of transactions) {
+        profileInfo += `- ${tx.subscription_type} (${tx.amount.toLocaleString()} تومان) - ${new Date(tx.created_at).toLocaleDateString('fa-IR')}\n`;
+      }
+    } else {
+      profileInfo += `بدون تراکنش ❌\n`;
+    }
+    
+    // ارسال پروفایل
+    await ctx.reply(profileInfo, 
+      Markup.inlineKeyboard([
+        [Markup.button.callback(`ارسال پیام به کاربر 📨`, `reply_user_${targetUserId}`)],
+        [Markup.button.callback(`بازگشت به مدیریت گروه 🔙`, `admin_vip_group`)]
+      ])
+    );
+  } catch (error) {
+    console.error('خطا در بررسی وضعیت کاربر:', error);
+    await ctx.reply(`خطا در دریافت اطلاعات پروفایل کاربر: ${error.message}`);
   }
+  
+  return;
+}
   
   // اگر کاربر در حالت ارسال پیام به ادمین است
   if (ctx.session && ctx.session.waitingForAdminMessage) {
